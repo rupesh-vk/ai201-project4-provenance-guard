@@ -2,7 +2,9 @@ import os
 import json
 from dotenv import load_dotenv
 from groq import Groq
+
 load_dotenv()
+
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 
@@ -46,3 +48,57 @@ Text to analyze:
     score = max(0.0, min(1.0, score))  # clamp to [0,1] in case model misbehaves
 
     return {"score": score, "reasoning": reasoning}
+
+
+def stylometric_signal(text: str) -> dict:
+    """
+    Signal 2: pure-Python structural heuristics. Returns a score 0-1
+    where 1.0 = high uniformity (AI-like), 0.0 = high variability (human-like).
+
+    Captures: sentence length variance, vocabulary diversity (type-token ratio),
+    average sentence length.
+    Blind spot: uniformity is a correlate of AI text, not proof — a terse or
+    repetitive human writer (e.g. a minimalist poem) can score AI-like here
+    without being AI-generated.
+    """
+    import re
+
+    # Split into sentences (simple heuristic split on . ! ?)
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+    if len(sentences) < 2:
+        # Not enough sentences to measure variance meaningfully -> uncertain
+        return {
+            "score": 0.5,
+            "sentence_count": len(sentences),
+            "reasoning": "Too few sentences to compute reliable stylometric signal."
+        }
+
+    sentence_lengths = [len(s.split()) for s in sentences]
+    mean_len = sum(sentence_lengths) / len(sentence_lengths)
+    variance = sum((l - mean_len) ** 2 for l in sentence_lengths) / len(sentence_lengths)
+    std_dev = variance ** 0.5
+
+    # Normalize variance: low std_dev (uniform sentences) -> high AI-likeness.
+    # std_dev of 0-2 words is very uniform; 8+ words is highly variable.
+    # We invert and clamp so low variance -> score near 1, high variance -> score near 0.
+    variance_score = max(0.0, min(1.0, 1 - (std_dev / 8)))
+
+    words = re.findall(r"\b\w+\b", text.lower())
+    if len(words) == 0:
+        ttr_score = 0.5
+    else:
+        unique_words = set(words)
+        ttr = len(unique_words) / len(words)
+        # Lower diversity -> more repetitive/generic -> more AI-like.
+        # TTR of ~0.4 is fairly repetitive; ~0.8 is highly diverse.
+        ttr_score = max(0.0, min(1.0, 1 - ((ttr - 0.7) / 0.3)))
+
+    # Combine the two structural sub-metrics evenly
+    combined = (0.6 * variance_score) + (0.4 * ttr_score)
+
+    return {
+        "score": round(combined, 3),
+        "sentence_length_std_dev": round(std_dev, 2),
+        "type_token_ratio": round(len(set(words)) / len(words), 3) if words else None,
+        "reasoning": f"Sentence length std dev: {round(std_dev, 2)}, vocabulary diversity (TTR): {round(len(set(words))/len(words), 3) if words else 'N/A'}"
+    }
